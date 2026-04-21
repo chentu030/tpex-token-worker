@@ -144,8 +144,8 @@ async def main(relay_url, num_workers=5):
     stop_event = asyncio.Event()
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        print("✓ Chromium 瀏覽器已啟動 (headless)")
+        browser = await pw.chromium.launch(headless=False)
+        print("✓ Chromium 瀏覽器已啟動 (headed + Xvfb 虛擬螢幕)")
 
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=15)
