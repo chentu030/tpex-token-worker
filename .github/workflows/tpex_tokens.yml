@@ -1,0 +1,70 @@
+# TPEX 遠端 Token 生產器 — GitHub Actions
+# 每個 runner 有不同的 IP，可以並行產生 Turnstile token 而不被 Cloudflare 限速
+#
+# 使用方式:
+#   1. 在本地電腦啟動主程式 (自動開啟 port 9999)
+#   2. 在本地電腦執行: ngrok http 9999
+#   3. 複製 ngrok URL (如 https://xxxx.ngrok-free.app)
+#   4. 到 GitHub repo → Actions → TPEX Token Generator → Run workflow
+#   5. 貼入 ngrok URL → 選擇 runner 數量 → 開始
+
+name: TPEX Token Generator
+
+on:
+  workflow_dispatch:
+    inputs:
+      relay_url:
+        description: 'Token relay URL (你的 ngrok URL, 如 https://xxxx.ngrok-free.app)'
+        required: true
+        type: string
+      workers_per_runner:
+        description: '每個 runner 的 token worker 數量'
+        required: false
+        default: '3'
+        type: string
+      duration_minutes:
+        description: '運行時間上限 (分鐘)'
+        required: false
+        default: '30'
+        type: string
+
+jobs:
+  generate-tokens:
+    # 5 個並行 runner = 5 個不同 IP = 15 個 token worker (每個 runner 3 個)
+    strategy:
+      matrix:
+        runner_id: [1, 2, 3, 4, 5]
+      fail-fast: false  # 一個失敗不影響其他
+    
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.duration_minutes || '30') }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright aiohttp
+          playwright install chromium --with-deps
+
+      - name: Show runner info
+        run: |
+          echo "Runner #${{ matrix.runner_id }}"
+          echo "IP: $(curl -s https://api.ipify.org)"
+          echo "Relay: ${{ inputs.relay_url }}"
+
+      - name: Generate tokens
+        run: |
+          timeout $(((${{ inputs.duration_minutes || 30 }} - 2) * 60)) \
+            python tpex_remote_token_worker.py \
+              "${{ inputs.relay_url }}" \
+              ${{ inputs.workers_per_runner || 3 }} \
+          || true
+        env:
+          PYTHONUNBUFFERED: '1'
