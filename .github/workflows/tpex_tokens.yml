@@ -20,7 +20,7 @@ on:
       workers_per_runner:
         description: '每個 runner 的 token worker 數量'
         required: false
-        default: '3'
+        default: '5'
         type: string
       duration_minutes:
         description: '運行時間上限 (分鐘)'
@@ -30,10 +30,10 @@ on:
 
 jobs:
   generate-tokens:
-    # 5 個並行 runner = 5 個不同 IP = 15 個 token worker (每個 runner 3 個)
+    # 10 個並行 runner = 10 個不同 IP = 50 個 token worker (每個 runner 5 個)
     strategy:
       matrix:
-        runner_id: [1, 2, 3, 4, 5]
+        runner_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
       fail-fast: false  # 一個失敗不影響其他
     
     runs-on: ubuntu-latest
