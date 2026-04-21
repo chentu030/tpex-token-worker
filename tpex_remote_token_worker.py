@@ -8,15 +8,15 @@
     python tpex_remote_token_worker.py https://xxxx.ngrok-free.app 5
 
 環境需求:
-    pip install playwright aiohttp
-    playwright install chromium
+    pip install patchright aiohttp
+    patchright install chromium
 """
 
 import asyncio
 import sys
 import time
 import aiohttp
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 
 # ===== TPEX Turnstile 設定 (與主程式一致) =====
 TPEX_URL = "https://www.tpex.org.tw/zh-tw/mainboard/trading/info/brokerBS.html"

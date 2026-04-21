@@ -50,8 +50,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install playwright aiohttp
-          playwright install chromium --with-deps
+          pip install patchright aiohttp
+          patchright install chromium --with-deps
 
       - name: Show runner info
         run: |
