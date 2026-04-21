@@ -30,10 +30,11 @@ on:
 
 jobs:
   generate-tokens:
-    # 10 個並行 runner = 10 個不同 IP = 50 個 token worker (每個 runner 5 個)
+    # 20 個並行 runner = 20 個不同 IP = 100 個 token worker (每個 runner 5 個)
+    # GitHub 免費版上限 = 20 個並行 job
     strategy:
       matrix:
-        runner_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        runner_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
       fail-fast: false  # 一個失敗不影響其他
     
     runs-on: ubuntu-latest
