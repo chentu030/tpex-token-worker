@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-遠端 Turnstile Token 生產器 — 在 GitHub Actions / Codespaces 執行
-生成的 token 透過 HTTP POST 傳回本地主程式的 Token 接收器
+TPEX 遠端下載 Worker — 在 GitHub Actions 執行
+流程: 取股票代碼 → 生成 Turnstile token → 直接下載 CSV → 上傳 CSV 到本地
+(token IP = 下載 IP, 不會有 IP 不匹配問題)
 
 用法:
     python tpex_remote_token_worker.py <RELAY_URL> [NUM_WORKERS]
@@ -66,39 +67,79 @@ async def get_token(page, worker_id, first_time=False):
         return None
 
 
-async def token_worker(browser, relay_url, worker_id, session, stop_event):
-    """單個 Token 生產者: 生 token → POST 到 relay"""
+async def download_csv(page, download_url, code, token):
+    """用 page.evaluate(fetch) 下載 CSV (確保 IP 一致 + 瀏覽器 TLS 指紋)"""
+    url = f"{download_url}?cf-turnstile-response={token}&code={code}&id=&response=utf-8"
+    result = await page.evaluate("""
+        async (url) => {
+            try {
+                const resp = await fetch(url);
+                const text = await resp.text();
+                return { ok: resp.ok, status: resp.status, text: text };
+            } catch(e) {
+                return { ok: false, error: e.message, text: "" };
+            }
+        }
+    """, url)
+    return result
+
+
+async def download_worker(browser, relay_url, worker_id, session, stop_event):
+    """下載 Worker: 取股票 → 生成token → 下載CSV → 上傳結果"""
     context = await browser.new_context(viewport={'width': 1280, 'height': 900})
     page = await context.new_page()
     await setup_solver_route(page)
+
+    download_count = 0
+    nodata_count = 0
+    fail_count = 0
     token_count = 0
-    consecutive_fails = 0
+    consecutive_token_fails = 0
+    idle_count = 0
 
     try:
         while not stop_event.is_set():
+            # 1. 向 relay 取得下一個待下載的股票
+            try:
+                async with session.get(f"{relay_url}/next_stock") as resp:
+                    data = await resp.json()
+            except aiohttp.ClientError as e:
+                print(f"[W{worker_id}] 無法連線 relay: {e}")
+                await asyncio.sleep(5)
+                continue
+
+            code = data.get('code')
+            if data.get('done', False):
+                print(f"[W{worker_id}] 主程式已完成")
+                break
+
+            if not code:
+                idle_count += 1
+                if idle_count > 30:  # 60秒無股票 → 結束
+                    print(f"[W{worker_id}] 長時間無待下載股票, 結束")
+                    break
+                await asyncio.sleep(2)
+                continue
+
+            idle_count = 0
+            download_url = data.get('download_url', '')
+
+            # 2. 生成 Turnstile token
             token = await get_token(page, worker_id, token_count == 0)
-            if token:
+            if not token:
+                consecutive_token_fails += 1
+                # 放回佇列
                 try:
                     async with session.post(
-                        f"{relay_url}/token",
-                        json={"token": token}
-                    ) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            token_count += 1
-                            consecutive_fails = 0
-                            if token_count % 5 == 0:
-                                print(f"[W{worker_id}] ✓ 已送出 {token_count} 個 token (queue={data.get('queue', '?')})")
-                        else:
-                            print(f"[W{worker_id}] 伺服器拒絕: HTTP {resp.status}")
-                except aiohttp.ClientError as e:
-                    print(f"[W{worker_id}] 傳送失敗: {e}")
-                    # 如果連不上 relay, 等一下再試
-                    await asyncio.sleep(5)
-            else:
-                consecutive_fails += 1
-                if consecutive_fails >= 5:
-                    print(f"[W{worker_id}] 連續5次失敗, 重建分頁...")
+                        f"{relay_url}/upload",
+                        json={'code': code, 'status': 'fail'}
+                    ):
+                        pass
+                except:
+                    pass
+
+                if consecutive_token_fails >= 5:
+                    print(f"[W{worker_id}] 連續{consecutive_token_fails}次 token 失敗, 重建分頁...")
                     try:
                         await page.close()
                         await context.close()
@@ -107,20 +148,69 @@ async def token_worker(browser, relay_url, worker_id, session, stop_event):
                     context = await browser.new_context(viewport={'width': 1280, 'height': 900})
                     page = await context.new_page()
                     await setup_solver_route(page)
-                    consecutive_fails = 0
+                    consecutive_token_fails = 0
                     await asyncio.sleep(5)
+                continue
 
-            # 定期檢查主程式是否已完成
-            if token_count > 0 and token_count % 10 == 0:
+            consecutive_token_fails = 0
+            token_count += 1
+
+            # 3. 用 page.evaluate(fetch) 下載 CSV
+            try:
+                result = await download_csv(page, download_url, code, token)
+            except Exception as e:
+                print(f"[W{worker_id}] 下載異常 {code}: {e}")
                 try:
-                    async with session.get(f"{relay_url}/status") as resp:
-                        data = await resp.json()
-                        if data.get('done', False):
-                            print(f"[W{worker_id}] 主程式已完成, 停止生產")
-                            stop_event.set()
-                            break
+                    async with session.post(
+                        f"{relay_url}/upload",
+                        json={'code': code, 'status': 'fail'}
+                    ):
+                        pass
                 except:
                     pass
+                fail_count += 1
+                continue
+
+            csv_text = result.get('text', '')
+            stripped = csv_text.strip()
+
+            # 檢查結果
+            if not result.get('ok'):
+                status = 'fail'
+                fail_count += 1
+            elif stripped.startswith('<!DOCTYPE') or stripped.startswith('<html'):
+                status = 'html'
+                fail_count += 1
+            elif len(stripped) < 10:
+                status = 'nodata'
+                nodata_count += 1
+            else:
+                status = 'ok'
+                download_count += 1
+
+            # 4. 上傳結果到 relay
+            try:
+                upload_data = {'code': code, 'status': status}
+                if status in ('ok', 'nodata'):
+                    upload_data['csv'] = csv_text
+
+                async with session.post(
+                    f"{relay_url}/upload",
+                    json=upload_data,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    resp_data = await resp.json()
+                    if status == 'html':
+                        print(f"[W{worker_id}] ⚠ {code} 收到HTML (token可能過期)")
+            except aiohttp.ClientError as e:
+                print(f"[W{worker_id}] 上傳失敗 {code}: {e}")
+                fail_count += 1
+                continue
+
+            total = download_count + nodata_count + fail_count
+            if total % 5 == 0 or total <= 3:
+                tag = '✓' if status == 'ok' else ('○' if status == 'nodata' else '✗')
+                print(f"[W{worker_id}] {tag} {code} (下載{download_count}/無資料{nodata_count}/失敗{fail_count})")
 
     except Exception as e:
         print(f"[W{worker_id}] 異常: {e}")
@@ -130,15 +220,15 @@ async def token_worker(browser, relay_url, worker_id, session, stop_event):
             await context.close()
         except:
             pass
-        print(f"[W{worker_id}] 結束 (共產生 {token_count} 個 token)")
+        print(f"[W{worker_id}] 結束: 成功{download_count} 無資料{nodata_count} 失敗{fail_count}")
 
 
 async def main(relay_url, num_workers=5):
     print("=" * 60)
-    print(f"TPEX 遠端 Token 生產器")
+    print("TPEX 遠端下載 Worker (GitHub Actions)")
     print(f"  Relay URL:  {relay_url}")
     print(f"  Workers:    {num_workers}")
-    print(f"  Sitekey:    {SITEKEY[:15]}...")
+    print(f"  模式:       取股票→生成token→下載CSV→上傳結果")
     print("=" * 60)
 
     stop_event = asyncio.Event()
@@ -148,16 +238,19 @@ async def main(relay_url, num_workers=5):
         print("✓ Chromium 瀏覽器已啟動 (headed + Xvfb 虛擬螢幕)")
 
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=15)
+            timeout=aiohttp.ClientTimeout(total=30)
         ) as session:
             # 先測試 relay 連線
             print(f"測試連線 {relay_url}/status ...")
             try:
                 async with session.get(f"{relay_url}/status") as resp:
                     data = await resp.json()
-                    print(f"✓ 連線成功! 目前進度: {data.get('progress', 0)}/{data.get('total', '?')}")
+                    remaining = data.get('stocks_remaining', '?')
+                    progress = data.get('progress', 0)
+                    total = data.get('total', '?')
+                    print(f"✓ 連線成功! 進度: {progress}/{total}, 剩餘: {remaining}")
                     if data.get('done', False):
-                        print("主程式已完成, 無需生產 token")
+                        print("主程式已完成, 無需下載")
                         await browser.close()
                         return
             except Exception as e:
@@ -170,12 +263,12 @@ async def main(relay_url, num_workers=5):
             tasks = []
             for i in range(num_workers):
                 t = asyncio.create_task(
-                    token_worker(browser, relay_url, i + 1, session, stop_event)
+                    download_worker(browser, relay_url, i + 1, session, stop_event)
                 )
                 tasks.append(t)
                 await asyncio.sleep(2)  # 錯開啟動
 
-            print(f"✓ {num_workers} 個 token worker 已啟動")
+            print(f"✓ {num_workers} 個下載 worker 已啟動")
             start_time = time.time()
 
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -192,11 +285,15 @@ if __name__ == "__main__":
         print("用法: python tpex_remote_token_worker.py <RELAY_URL> [NUM_WORKERS]")
         print("範例: python tpex_remote_token_worker.py https://xxxx.ngrok-free.app 5")
         print()
+        print("流程:")
+        print("  GitHub Actions: 取股票 → 生成token → 下載CSV → 上傳CSV")
+        print("  本地主程式:     分配股票 ← ─ ─ ─ ─ ─ ─ ─ ─ → 儲存檔案")
+        print()
         print("步驟:")
-        print("  1. 在本地電腦啟動主程式 (會自動開啟 port 9999 的 token 接收器)")
+        print("  1. 在本地電腦啟動主程式 (會自動開啟 port 9999)")
         print("  2. 在本地電腦執行: ngrok http 9999")
         print("  3. 複製 ngrok 給的 URL (如 https://xxxx.ngrok-free.app)")
-        print("  4. 在 GitHub Actions 或 Codespaces 執行此腳本, 傳入 ngrok URL")
+        print("  4. 到 GitHub → Actions → Run workflow → 貼入 URL")
         sys.exit(1)
 
     relay_url = sys.argv[1].rstrip('/')
