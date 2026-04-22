@@ -91,8 +91,8 @@ async def download_worker(browser, relay_url, worker_id, session, stop_event):
     await setup_solver_route(page)
 
     download_count = 0
-    nodata_count = 0
     fail_count = 0
+    empty_count = 0  # 空回應次數 (歸入 fail, 不標記 nodata)
     token_count = 0
     consecutive_token_fails = 0
     idle_count = 0
@@ -175,23 +175,28 @@ async def download_worker(browser, relay_url, worker_id, session, stop_event):
             stripped = csv_text.strip()
 
             # 檢查結果
+            # 遠端 worker 不標記 nodata (GitHub IP 可能收到假空回應)
+            # 只有包含正確 CSV 標頭的才算 ok, 其餘都 fail 放回佇列
             if not result.get('ok'):
                 status = 'fail'
                 fail_count += 1
             elif stripped.startswith('<!DOCTYPE') or stripped.startswith('<html'):
                 status = 'html'
                 fail_count += 1
-            elif len(stripped) < 10:
-                status = 'nodata'
-                nodata_count += 1
-            else:
+            elif '券商' in stripped and len(stripped) >= 10:
                 status = 'ok'
                 download_count += 1
+            else:
+                # 空回應或無法辨識 → 當作失敗, 放回佇列讓本地處理
+                status = 'fail'
+                fail_count += 1
+                if len(stripped) < 10:
+                    empty_count += 1
 
             # 4. 上傳結果到 relay
             try:
                 upload_data = {'code': code, 'status': status}
-                if status in ('ok', 'nodata'):
+                if status == 'ok':
                     upload_data['csv'] = csv_text
 
                 async with session.post(
@@ -207,10 +212,10 @@ async def download_worker(browser, relay_url, worker_id, session, stop_event):
                 fail_count += 1
                 continue
 
-            total = download_count + nodata_count + fail_count
+            total = download_count + fail_count
             if total % 5 == 0 or total <= 3:
-                tag = '✓' if status == 'ok' else ('○' if status == 'nodata' else '✗')
-                print(f"[W{worker_id}] {tag} {code} (下載{download_count}/無資料{nodata_count}/失敗{fail_count})")
+                tag = '✓' if status == 'ok' else '✗'
+                print(f"[W{worker_id}] {tag} {code} (成功{download_count}/失敗{fail_count}/空回應{empty_count})")
 
     except Exception as e:
         print(f"[W{worker_id}] 異常: {e}")
@@ -220,7 +225,7 @@ async def download_worker(browser, relay_url, worker_id, session, stop_event):
             await context.close()
         except:
             pass
-        print(f"[W{worker_id}] 結束: 成功{download_count} 無資料{nodata_count} 失敗{fail_count}")
+        print(f"[W{worker_id}] 結束: 成功{download_count} 失敗{fail_count} (空回應{empty_count})")
 
 
 async def main(relay_url, num_workers=5):
