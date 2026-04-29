@@ -86,7 +86,7 @@ BATCH_PER_TOKEN = 1
 # ===== 頻率限制偵測 & 冷却機制 =====
 RATE_LIMIT_EMPTY_THRESHOLD = 3   # 單一 worker 連續空回應次數 → 觤發全局冷却
 COOLDOWN_BASE = 90               # 基礎冷却秒數 (1.5分鐘)
-COOLDOWN_MAX = 300               # 最大冷却秒數 (5分鐘)
+COOLDOWN_MAX = 1200              # 最大冷却秒數 (20分鐘)
 COOLDOWN_DECAY = 0.1             # 每次成功下載後 cooldown_level 遞減值 (緩慢回復)
 PACE_DELAY_PER_LEVEL = 3         # 冷却後每次請求間隔 (秒/level, 最高 15秒)
 
