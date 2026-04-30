@@ -94,11 +94,18 @@ PACE_DELAY_PER_LEVEL = 3         # 冷却後每次請求間隔 (秒/level, 最�
 PAGE_REBUILD_INTERVAL = 50  # 每 N 次 token 生成後重建分頁 (防止記憶體洩漏)
 MAX_BROWSER_CRASHES = 3     # 瀏覽器崩潰恢復上限
 
+# ===== 批次暫停機制 (避免 TPEX 頻率封鎖) =====
+FIRST_BATCH_SIZE = 1300       # 第一批處理數量
+SUBSEQUENT_BATCH_SIZE = 1300  # 後續每批處理數量
+BATCH_PAUSE_SECONDS = 15 * 60 # 批次間暫停時間 (15分鐘)
 
-async def download_worker(browser, relay_url, worker_id, session, dl_session, stop_event, stats, cooldown_state):
+
+async def download_worker(browser, relay_url, worker_id, session, dl_session, stop_event, stats, cooldown_state, batch_state=None):
     """單個下載 Worker: 用瀏覽器 fetch() 下載, 一個 token 批量處理多支
-    cooldown_state: [cooldown_until, cooldown_level] 共享的冷却狀態"""
+    cooldown_state: [cooldown_until, cooldown_level] 共享的冷却狀態
+    batch_state: [batch_total, batch_limit, batch_pause_until] 共享的批次暫停狀態"""
     cooldown_until, cooldown_level = cooldown_state
+    batch_total, batch_limit, batch_pause_until = batch_state if batch_state else ([0], [999999], [0.0])
     ok_count = 0
     nodata_count = 0
     fail_count = 0
@@ -137,6 +144,16 @@ async def download_worker(browser, relay_url, worker_id, session, dl_session, st
         batch_count = 0
 
         while not stop_event.is_set():
+            # ---- 批次暫停檢查 ----
+            now_ts = time.time()
+            if now_ts < batch_pause_until[0]:
+                wait_secs = batch_pause_until[0] - now_ts
+                if wait_secs > 2:
+                    mins_left = int(wait_secs) // 60 + 1
+                    print(f"[W{worker_id}] 批次暫停中, 剩餘 {mins_left} 分鐘...")
+                await asyncio.sleep(min(wait_secs, 30))
+                continue
+
             # ---- 頻率限制冷却檢查 ----
             now_ts = time.time()
             if now_ts < cooldown_until[0]:
@@ -255,6 +272,15 @@ async def download_worker(browser, relay_url, worker_id, session, dl_session, st
                     print(f"[W{worker_id}] 上傳失敗 {code}: {e}")
                     fail_count += 1
 
+                # ---- 批次計數 & 暫停觸發 ----
+                batch_total[0] += 1
+                if batch_total[0] >= batch_limit[0] and batch_pause_until[0] < time.time():
+                    pause_mins = BATCH_PAUSE_SECONDS // 60
+                    next_batch = SUBSEQUENT_BATCH_SIZE
+                    batch_pause_until[0] = time.time() + BATCH_PAUSE_SECONDS
+                    batch_limit[0] += next_batch
+                    print(f"[W{worker_id}] ✘ 已完成 {batch_total[0]} 支, 暫停 {pause_mins} 分鐘, 下批 {next_batch} 支")
+
                 total_done = ok_count + nodata_count + fail_count
                 if total_done % 5 == 0:
                     cd_info = f" CD={cooldown_level[0]:.1f}" if cooldown_level[0] > 0 else ""
@@ -345,6 +371,13 @@ async def main(relay_url, num_workers=5):
         cooldown_level = [0.0]
         cooldown_state = (cooldown_until, cooldown_level)
 
+        # 共享的批次暫停狀態 (第一批 1300 支 → 暫停 20 分鐘 → 每批 1500 支)
+        batch_total = [0]                    # 所有 worker 累計處理數
+        batch_limit = [FIRST_BATCH_SIZE]     # 下次暫停的閾值
+        batch_pause_until = [0.0]            # 暫停到的時間戳
+        batch_state = (batch_total, batch_limit, batch_pause_until)
+        print(f"  批次暫停: 每 {FIRST_BATCH_SIZE}(首批)/{SUBSEQUENT_BATCH_SIZE}(後續) 支暫停 {BATCH_PAUSE_SECONDS//60} 分鐘")
+
         start_time = time.time()
         browser_restarts = 0
 
@@ -360,7 +393,7 @@ async def main(relay_url, num_workers=5):
                     tasks = []
                     for i in range(num_workers):
                         t = asyncio.create_task(
-                            download_worker(browser, relay_url, i + 1, relay_session, None, stop_event, stats, cooldown_state)
+                            download_worker(browser, relay_url, i + 1, relay_session, None, stop_event, stats, cooldown_state, batch_state)
                         )
                         tasks.append(t)
                         await asyncio.sleep(3)
