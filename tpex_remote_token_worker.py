@@ -85,10 +85,7 @@ BATCH_PER_TOKEN = 1
 
 # ===== 頻率限制偵測 & 冷却機制 =====
 RATE_LIMIT_EMPTY_THRESHOLD = 3   # 單一 worker 連續空回應次數 → 觤發全局冷却
-COOLDOWN_BASE = 90               # 基礎冷却秒數 (1.5分鐘)
-COOLDOWN_MAX = 1200              # 最大冷却秒數 (20分鐘)
-COOLDOWN_DECAY = 0.1             # 每次成功下載後 cooldown_level 遞減值 (緩慢回復)
-PACE_DELAY_PER_LEVEL = 3         # 冷却後每次請求間隔 (秒/level, 最高 15秒)
+COOLDOWN_FIXED = 900             # 固定冷却秒數 (15分鐘)
 
 
 PAGE_REBUILD_INTERVAL = 50  # 每 N 次 token 生成後重建分頁 (防止記憶體洩漏)
@@ -102,9 +99,9 @@ BATCH_PAUSE_SECONDS = 15 * 60 # 批次間暫停時間 (15分鐘)
 
 async def download_worker(browser, relay_url, worker_id, session, dl_session, stop_event, stats, cooldown_state, batch_state=None):
     """單個下載 Worker: 用瀏覽器 fetch() 下載, 一個 token 批量處理多支
-    cooldown_state: [cooldown_until, cooldown_level] 共享的冷却狀態
+    cooldown_state: [cooldown_until] 共享的冷却狀態 (固定 15 分鐘)
     batch_state: [batch_total, batch_limit, batch_pause_until] 共享的批次暫停狀態"""
-    cooldown_until, cooldown_level = cooldown_state
+    cooldown_until = cooldown_state
     batch_total, batch_limit, batch_pause_until = batch_state if batch_state else ([0], [999999], [0.0])
     ok_count = 0
     nodata_count = 0
@@ -164,11 +161,6 @@ async def download_worker(browser, relay_url, worker_id, session, dl_session, st
                 consecutive_empty = 0  # 冷却結束後重置, 給新機會
                 continue
 
-            # ---- 冷却後降速: 每次請求前加延遲 ----
-            if cooldown_level[0] > 0:
-                pace = min(PACE_DELAY_PER_LEVEL * cooldown_level[0], 15)
-                await asyncio.sleep(pace)
-
             try:  # ★ 包住整個迴圈體, 捕捉瀏覽器崩潰
 
                 # ---- Step 1: 確保有可用的 token ----
@@ -227,22 +219,18 @@ async def download_worker(browser, relay_url, worker_id, session, dl_session, st
                                 status = 'fail'
                                 csv_text = ''
                                 token = None
-                                # 觸發全局冷却
-                                cd_secs = min(COOLDOWN_BASE * (1.5 ** cooldown_level[0]), COOLDOWN_MAX)
-                                cooldown_until[0] = time.time() + cd_secs
-                                cooldown_level[0] += 1
+                                # 觸發全局冷却 (固定 15 分鐘)
+                                cooldown_until[0] = time.time() + COOLDOWN_FIXED
                                 print(f"[W{worker_id}] ⚠ 頻率限制 (連續{consecutive_empty}次空回應)"
-                                      f" → 全部冷却 {cd_secs:.0f}秒 (level={cooldown_level[0]})")
+                                      f" → 全部冷却 {COOLDOWN_FIXED}秒 ({COOLDOWN_FIXED//60}分鐘)")
                             else:
                                 # 前幾次空回應當作 nodata (可能真的無資料)
                                 status = 'nodata'
                                 csv_text = stripped
                         else:
                             status = 'ok'
-                            # 成功下載 → 重置空回應計數, 逐步降低冷却等級
+                            # 成功下載 → 重置空回應計數
                             consecutive_empty = 0
-                            if cooldown_level[0] > 0:
-                                cooldown_level[0] = max(0, cooldown_level[0] - COOLDOWN_DECAY)
                     else:
                         status = 'fail'
                         token = None  # 請求失敗, 換新 token
@@ -283,8 +271,7 @@ async def download_worker(browser, relay_url, worker_id, session, dl_session, st
 
                 total_done = ok_count + nodata_count + fail_count
                 if total_done % 5 == 0:
-                    cd_info = f" CD={cooldown_level[0]:.1f}" if cooldown_level[0] > 0 else ""
-                    print(f"[W{worker_id}] 已處理 {total_done} 支 (✓{ok_count} ○{nodata_count} ✗{fail_count}{cd_info})")
+                    print(f"[W{worker_id}] 已處理 {total_done} 支 (✓{ok_count} ○{nodata_count} ✗{fail_count})")
 
                 # 定期檢查主程式是否已完成
                 if total_done % 20 == 0:
@@ -366,12 +353,11 @@ async def main(relay_url, num_workers=5):
             print("  請確認主程式已啟動且 ngrok 正在運行")
             return
 
-        # 共享的頻率限制冷却狀態 (用 list 以便在 workers 間共享)
+        # 共享的頻率限制冷却狀態 (固定 15 分鐘, 所有 worker 一起等)
         cooldown_until = [0.0]
-        cooldown_level = [0.0]
-        cooldown_state = (cooldown_until, cooldown_level)
+        cooldown_state = cooldown_until
 
-        # 共享的批次暫停狀態 (第一批 1300 支 → 暫停 20 分鐘 → 每批 1500 支)
+        # 共享的批次暫停狀態 (每 1300 支 → 暫停 15 分鐘)
         batch_total = [0]                    # 所有 worker 累計處理數
         batch_limit = [FIRST_BATCH_SIZE]     # 下次暫停的閾值
         batch_pause_until = [0.0]            # 暫停到的時間戳
