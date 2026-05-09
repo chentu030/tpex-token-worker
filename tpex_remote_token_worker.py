@@ -47,7 +47,10 @@ async def setup_solver_route(page):
 async def get_token(page, worker_id, first_time=False):
     """導航/reload 極簡頁面並等待 Turnstile token"""
     try:
-        if first_time:
+        current_url = page.url or ''
+        need_navigate = first_time or 'about:blank' in current_url or 'tpex.org.tw' not in current_url
+
+        if need_navigate:
             await page.goto(TPEX_URL, wait_until='domcontentloaded', timeout=60000)
         else:
             await page.reload(wait_until='domcontentloaded')
