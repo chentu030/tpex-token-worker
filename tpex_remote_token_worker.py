@@ -84,7 +84,7 @@ async (url) => {
 """
 
 # Turnstile token 是一次性的, 每次下載都要新 token
-BATCH_PER_TOKEN = 100
+BATCH_PER_TOKEN = 1
 
 # ===== 頻率限制偵測 & 冷却機制 =====
 RATE_LIMIT_EMPTY_THRESHOLD = 3   # 單一 worker 連續空回應次數 → 觤發全局冷却
@@ -186,16 +186,14 @@ async def download_worker(browser, relay_url, worker_id, session, dl_session, st
                     batch_count = 0
                     consecutive_token_fails = 0
 
-                # ---- Step 2: 從 relay 取得股票代碼 (批次) ----
+                # ---- Step 2: 從 relay 取得股票代碼 ----
                 try:
                     async with session.get(f"{relay_url}/next_stock") as resp:
                         data = await resp.json()
-                        if data.get('done', False) or (not data.get('codes') and not data.get('code')):
+                        if data.get('done', False) or not data.get('code'):
                             print(f"[W{worker_id}] 沒有更多股票, 結束")
                             break
-                        codes = data.get('codes', [])
-                        if not codes and data.get('code'):
-                            codes = [data.get('code')]
+                        code = data['code']
                         download_url = data.get('download_url', '')
                 except aiohttp.ClientError as e:
                     print(f"[W{worker_id}] 取股票失敗: {e}")
@@ -203,72 +201,67 @@ async def download_worker(browser, relay_url, worker_id, session, dl_session, st
                     continue
 
                 # ---- Step 3: 用瀏覽器 fetch() 下載 CSV (帶完整 cookies) ----
-                results_payload = []
-                for idx, code in enumerate(codes):
-                    dl_url = f"{download_url}?cf-turnstile-response={token}&code={code}&id=&response=utf-8"
-                    status = 'fail'
-                    csv_text = ''
-                    try:
-                        result = await page.evaluate(FETCH_JS_TEMPLATE, dl_url)
-                        if result and result.get('ok'):
-                            csv_text = result.get('text', '')
-                            stripped = csv_text.strip()
-                            if stripped.startswith('<!DOCTYPE') or stripped.startswith('<html'):
-                                status = 'html'
+                dl_url = f"{download_url}?cf-turnstile-response={token}&code={code}&id=&response=utf-8"
+                status = 'fail'
+                csv_text = ''
+                try:
+                    result = await page.evaluate(FETCH_JS_TEMPLATE, dl_url)
+                    if result and result.get('ok'):
+                        csv_text = result.get('text', '')
+                        stripped = csv_text.strip()
+                        if stripped.startswith('<!DOCTYPE') or stripped.startswith('<html'):
+                            status = 'html'
+                            csv_text = ''
+                            html_rejects += 1
+                            token = None  # token 過期, 下次取新的
+                        elif len(stripped) < 10:
+                            # 空回應: 可能是真的無資料, 也可能是 TPEX 頻率限制
+                            consecutive_empty += 1
+                            if consecutive_empty >= RATE_LIMIT_EMPTY_THRESHOLD:
+                                # 連續多次空回應 → 判定為頻率限制, 回報 fail 讓主程式重新分配
+                                status = 'fail'
                                 csv_text = ''
-                                html_rejects += 1
-                                token = None  # token 過期, 下次取新的
-                            elif len(stripped) < 10:
-                                consecutive_empty += 1
-                                if consecutive_empty >= RATE_LIMIT_EMPTY_THRESHOLD:
-                                    status = 'fail'
-                                    csv_text = ''
-                                    token = None
-                                    cooldown_until[0] = time.time() + COOLDOWN_FIXED
-                                    print(f"[W{worker_id}] ⚠ 頻率限制 (連續{consecutive_empty}次空回應)"
-                                          f" → 全部冷却 {COOLDOWN_FIXED}秒 ({COOLDOWN_FIXED//60}分鐘)")
-                                else:
-                                    status = 'nodata'
-                                    csv_text = stripped
+                                token = None
+                                # 觸發全局冷却 (固定 15 分鐘)
+                                cooldown_until[0] = time.time() + COOLDOWN_FIXED
+                                print(f"[W{worker_id}] ⚠ 頻率限制 (連續{consecutive_empty}次空回應)"
+                                      f" → 全部冷却 {COOLDOWN_FIXED}秒 ({COOLDOWN_FIXED//60}分鐘)")
                             else:
-                                status = 'ok'
-                                consecutive_empty = 0
+                                # 前幾次空回應當作 nodata (可能真的無資料)
+                                status = 'nodata'
+                                csv_text = stripped
                         else:
-                            status = 'fail'
-                            token = None  # 請求失敗, 換新 token
-                    except Exception as e:
-                        print(f"[W{worker_id}] fetch 失敗 {code}: {e}")
-                        status = 'fail'
-                        token = None
-
-                    batch_count += 1
-                    results_payload.append({'code': code, 'csv': csv_text, 'status': status})
-                    
-                    if status == 'ok':
-                        ok_count += 1
-                    elif status == 'nodata':
-                        nodata_count += 1
+                            status = 'ok'
+                            # 成功下載 → 重置空回應計數
+                            consecutive_empty = 0
                     else:
-                        fail_count += 1
+                        status = 'fail'
+                        token = None  # 請求失敗, 換新 token
+                except Exception as e:
+                    print(f"[W{worker_id}] fetch 失敗 {code}: {e}")
+                    status = 'fail'
+                    token = None
 
-                    if token is None:
-                        # Token失效，將剩餘的代碼標記為失敗並中斷迴圈
-                        for remaining_code in codes[idx+1:]:
-                            results_payload.append({'code': remaining_code, 'csv': '', 'status': 'fail'})
-                            fail_count += 1
-                            batch_count += 1
-                        break
+                batch_count += 1
 
-                # ---- Step 4: 批次上傳結果到 relay ----
+                # ---- Step 4: 上傳結果到 relay ----
                 try:
                     async with session.post(f"{relay_url}/upload",
-                        json={'results': results_payload}
+                        json={'code': code, 'csv': csv_text, 'status': status}
                     ) as resp:
                         res = await resp.json()
-                        if not res.get('ok'):
-                            print(f"[W{worker_id}] 批次上傳失敗")
+                        if res.get('ok'):
+                            if status == 'ok':
+                                ok_count += 1
+                            elif status == 'nodata':
+                                nodata_count += 1
+                            else:
+                                fail_count += 1
+                        else:
+                            fail_count += 1
                 except Exception as e:
-                    print(f"[W{worker_id}] 上傳批次失敗: {e}")
+                    print(f"[W{worker_id}] 上傳失敗 {code}: {e}")
+                    fail_count += 1
 
                 # ---- 批次計數 & 暫停觸發 ----
                 batch_total[0] += 1
