@@ -55,6 +55,11 @@ jobs:
           pip install patchright aiohttp
           patchright install chromium --with-deps
 
+      - name: Setup Cloudflare WARP
+        uses: fscarmen/warp-on-actions@v1.1
+        with:
+          stack: dual
+
       - name: Show runner info
         run: |
           echo "Runner #${{ matrix.runner_id }}"
