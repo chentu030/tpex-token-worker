@@ -177,10 +177,10 @@ async def download_worker(browser, relay_url, worker_id, session, dl_session, st
                     token = await get_token(page, worker_id, token_count == 0)
                     if not token:
                         consecutive_token_fails += 1
-                        if consecutive_token_fails >= 3:
-                            print(f"[W{worker_id}] 連續 {consecutive_token_fails} 次取不到 Token，判定為 Dirty IP，立刻退出換新機器！")
-                            stop_event.set()
-                            break
+                        if consecutive_token_fails >= 5:
+                            context, page = await rebuild_page(f"連續{consecutive_token_fails}次token失敗")
+                            consecutive_token_fails = 0
+                            await asyncio.sleep(3)
                         continue
                     token_count += 1
                     batch_count = 0
@@ -222,9 +222,10 @@ async def download_worker(browser, relay_url, worker_id, session, dl_session, st
                                 status = 'fail'
                                 csv_text = ''
                                 token = None
-                                print(f"[W{worker_id}] ⚠ 頻率限制 (連續{consecutive_empty}次空回應) → IP 已被封鎖，觸發退出讓 GitHub 換新機器！")
-                                stop_event.set()
-                                break
+                                # 觸發全局冷却 (固定 15 分鐘)
+                                cooldown_until[0] = time.time() + COOLDOWN_FIXED
+                                print(f"[W{worker_id}] ⚠ 頻率限制 (連續{consecutive_empty}次空回應)"
+                                      f" → 全部冷却 {COOLDOWN_FIXED}秒 ({COOLDOWN_FIXED//60}分鐘)")
                             else:
                                 # 前幾次空回應當作 nodata (可能真的無資料)
                                 status = 'nodata'
