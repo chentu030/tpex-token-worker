@@ -1,4 +1,14 @@
-﻿name: TPEX Token Generator
+# TPEX 遠端 Token 生產器 — GitHub Actions
+# 每個 runner 有不同的 IP，可以並行產生 Turnstile token 而不被 Cloudflare 限速
+#
+# 使用方式:
+#   1. 在本地電腦啟動主程式 (自動開啟 port 9999)
+#   2. 在本地電腦執行: ngrok http 9999
+#   3. 複製 ngrok URL (如 https://xxxx.ngrok-free.app)
+#   4. 到 GitHub repo → Actions → TPEX Token Generator → Run workflow
+#   5. 貼入 ngrok URL → 選擇 runner 數量 → 開始
+
+name: TPEX Token Generator
 
 on:
   workflow_dispatch:
@@ -19,110 +29,42 @@ on:
         type: string
 
 jobs:
-  generate-tokens-1:
+  generate-tokens:
+    # 20 個並行 runner = 20 個不同 IP = 100 個 token worker (每個 runner 5 個)
+    # GitHub 免費版上限 = 20 個並行 job
     strategy:
       max-parallel: 20
       matrix:
-        runner_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150]
-      fail-fast: false
+        runner_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120]
+      fail-fast: false  # 一個失敗不影響其他
+    
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ fromJSON(inputs.duration_minutes || '30') }}
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y xvfb
-          pip install patchright aiohttp
-          patchright install chromium --with-deps
-      - name: Show runner info
-        run: |
-          echo "Runner #${{ matrix.runner_id }}"
-          echo "IP: $(curl -s https://api.ipify.org)"
-          echo "Relay: ${{ inputs.relay_url }}"
-      - name: Generate tokens
-        run: |
-          timeout 1680 \
-            xvfb-run --auto-servernum \
-            python 分點爬蟲/tpex_remote_token_worker.py \
-              "${{ inputs.relay_url }}" \
-              ${{ inputs.workers_per_runner || 5 }} \
-          || true
-        env:
-          PYTHONUNBUFFERED: '1'
-          DISPLAY: ':99'
 
-  generate-tokens-2:
-    needs: generate-tokens-1
-    strategy:
-      max-parallel: 20
-      matrix:
-        runner_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150]
-      fail-fast: false
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y xvfb
-          pip install patchright aiohttp
-          patchright install chromium --with-deps
-      - name: Show runner info
-        run: |
-          echo "Runner #${{ matrix.runner_id }}"
-          echo "IP: $(curl -s https://api.ipify.org)"
-          echo "Relay: ${{ inputs.relay_url }}"
-      - name: Generate tokens
-        run: |
-          timeout 1680 \
-            xvfb-run --auto-servernum \
-            python 分點爬蟲/tpex_remote_token_worker.py \
-              "${{ inputs.relay_url }}" \
-              ${{ inputs.workers_per_runner || 5 }} \
-          || true
-        env:
-          PYTHONUNBUFFERED: '1'
-          DISPLAY: ':99'
 
-  generate-tokens-3:
-    needs: generate-tokens-2
-    strategy:
-      max-parallel: 20
-      matrix:
-        runner_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150]
-      fail-fast: false
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - name: Install dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y xvfb
           pip install patchright aiohttp
           patchright install chromium --with-deps
+
       - name: Show runner info
         run: |
           echo "Runner #${{ matrix.runner_id }}"
           echo "IP: $(curl -s https://api.ipify.org)"
           echo "Relay: ${{ inputs.relay_url }}"
+
       - name: Generate tokens
         run: |
-          timeout 1680 \
+          timeout $(((${{ inputs.duration_minutes || 30 }} - 2) * 60)) \
             xvfb-run --auto-servernum \
             python 分點爬蟲/tpex_remote_token_worker.py \
               "${{ inputs.relay_url }}" \
