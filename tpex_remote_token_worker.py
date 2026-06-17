@@ -17,7 +17,6 @@ import sys
 import time
 import traceback
 import aiohttp
-import subprocess
 from patchright.async_api import async_playwright
 
 # ===== TPEX Turnstile 設定 (與主程式一致) =====
@@ -100,71 +99,13 @@ FIRST_BATCH_SIZE = 1300       # 第一批處理數量
 SUBSEQUENT_BATCH_SIZE = 1300  # 後續每批處理數量
 BATCH_PAUSE_SECONDS = 15 * 60 # 批次間暫停時間 (15分鐘)
 
-# ===== Cloudflare WARP IP 輪換 =====
-MAX_WARP_ROTATIONS = 15        # 單次任務最多輪換次數
-WARP_POST_ROTATE_WAIT = 15     # 輪換成功後短暫等待秒數
 
-
-async def rotate_warp_ip():
-    """重連 Cloudflare WARP 取得新 IP (GitHub Actions 環境)
-    回傳 True = 成功換 IP 或重連, False = 失敗 (非 WARP 環境)"""
-    try:
-        # 檢查 warp-cli 是否可用
-        ver = subprocess.run(['warp-cli', '--version'], capture_output=True, timeout=5)
-        if ver.returncode != 0:
-            return False
-
-        # 取得目前 IP
-        old = subprocess.run(['curl', '-s', '--max-time', '5', 'https://ifconfig.me'],
-                            capture_output=True, text=True, timeout=10)
-        old_ip = old.stdout.strip() if old.returncode == 0 else ''
-        new_ip = ''
-
-        # 嘗試兩輪: 第1輪簡單重連, 第2輪重新註冊
-        for attempt in range(2):
-            subprocess.run(['warp-cli', 'disconnect'], capture_output=True, timeout=10)
-            await asyncio.sleep(2)
-            if attempt > 0:
-                # 第2輪: 刪除註冊重來, 更可能取得新 IP
-                subprocess.run(['warp-cli', 'registration', 'delete'],
-                             capture_output=True, timeout=10)
-                await asyncio.sleep(1)
-                subprocess.run(['warp-cli', 'registration', 'new'],
-                             capture_output=True, timeout=10)
-                await asyncio.sleep(1)
-            subprocess.run(['warp-cli', 'connect'], capture_output=True, timeout=15)
-            await asyncio.sleep(5)
-
-            new = subprocess.run(['curl', '-s', '--max-time', '5', 'https://ifconfig.me'],
-                                capture_output=True, text=True, timeout=10)
-            new_ip = new.stdout.strip() if new.returncode == 0 else ''
-
-            if new_ip and new_ip != old_ip:
-                print(f"[WARP] ✓ IP 輪換: {old_ip} → {new_ip}")
-                return True
-
-        # IP 沒變但重連成功 (可能重置限速狀態)
-        if new_ip:
-            print(f"[WARP] IP 未變 ({new_ip}), 但已重連 (可能重置限速)")
-            return True
-
-        print("[WARP] ✗ 無法取得 IP")
-        return False
-    except FileNotFoundError:
-        return False
-    except Exception as e:
-        print(f"[WARP] ✗ 輪換異常: {type(e).__name__}: {e}")
-        return False
-
-
-async def download_worker(browser, relay_url, worker_id, session, dl_session, stop_event, stats, cooldown_state, batch_state=None, warp_state=None):
+async def download_worker(browser, relay_url, worker_id, session, dl_session, stop_event, stats, cooldown_state, batch_state=None):
     """單個下載 Worker: 用瀏覽器 fetch() 下載, 一個 token 批量處理多支
-    cooldown_state: [cooldown_until] 共享的冷却狀態
-    batch_state: [batch_total, batch_limit, batch_pause_until] 共享的批次暫停狀態
-    warp_state: [rotation_count] 共享的 WARP IP 輪換計數"""
+    cooldown_state: [cooldown_until] 共享的冷却狀態 (固定 15 分鐘)
+    batch_state: [batch_total, batch_limit, batch_pause_until] 共享的批次暫停狀態"""
     cooldown_until = cooldown_state
     batch_total, batch_limit, batch_pause_until = batch_state if batch_state else ([0], [999999], [0.0])
-    warp_rotations = warp_state if warp_state else [0]
     ok_count = 0
     nodata_count = 0
     fail_count = 0
@@ -281,27 +222,10 @@ async def download_worker(browser, relay_url, worker_id, session, dl_session, st
                                 status = 'fail'
                                 csv_text = ''
                                 token = None
-                                # 嘗試 WARP IP 輪換 (如果可用且未達上限)
-                                now = time.time()
-                                if cooldown_until[0] > now:
-                                    # 其他 worker 已觸發冷却, 跟隨即可
-                                    pass
-                                elif warp_rotations[0] < MAX_WARP_ROTATIONS:
-                                    # 先佔位防止其他 worker 同時輪換
-                                    cooldown_until[0] = now + 600
-                                    print(f"[W{worker_id}] ⚠ 頻率限制 (連續{consecutive_empty}次空回應), 嘗試 WARP IP 輪換...")
-                                    rotated = await rotate_warp_ip()
-                                    if rotated:
-                                        warp_rotations[0] += 1
-                                        cooldown_until[0] = time.time() + WARP_POST_ROTATE_WAIT
-                                        print(f"[W{worker_id}] WARP 輪換成功 (第{warp_rotations[0]}次), {WARP_POST_ROTATE_WAIT}秒後繼續")
-                                    else:
-                                        cooldown_until[0] = time.time() + COOLDOWN_FIXED
-                                        print(f"[W{worker_id}] WARP 輪換失敗 → 冷却 {COOLDOWN_FIXED}秒 ({COOLDOWN_FIXED//60}分鐘)")
-                                else:
-                                    cooldown_until[0] = now + COOLDOWN_FIXED
-                                    print(f"[W{worker_id}] ⚠ 頻率限制 (已達輪換上限{MAX_WARP_ROTATIONS}次)"
-                                          f" → 冷却 {COOLDOWN_FIXED}秒 ({COOLDOWN_FIXED//60}分鐘)")
+                                # 觸發全局冷却 (固定 15 分鐘)
+                                cooldown_until[0] = time.time() + COOLDOWN_FIXED
+                                print(f"[W{worker_id}] ⚠ 頻率限制 (連續{consecutive_empty}次空回應)"
+                                      f" → 全部冷却 {COOLDOWN_FIXED}秒 ({COOLDOWN_FIXED//60}分鐘)")
                             else:
                                 # 前幾次空回應當作 nodata (可能真的無資料)
                                 status = 'nodata'
@@ -444,9 +368,6 @@ async def main(relay_url, num_workers=5):
         batch_state = (batch_total, batch_limit, batch_pause_until)
         print(f"  批次暫停: 每 {FIRST_BATCH_SIZE}(首批)/{SUBSEQUENT_BATCH_SIZE}(後續) 支暫停 {BATCH_PAUSE_SECONDS//60} 分鐘")
 
-        # 共享的 WARP IP 輪換計數 (所有 worker 共用)
-        warp_state = [0]  # [rotation_count]
-
         start_time = time.time()
         browser_restarts = 0
 
@@ -454,7 +375,14 @@ async def main(relay_url, num_workers=5):
             while browser_restarts <= MAX_BROWSER_RESTARTS and not stop_event.is_set():
                 browser = None
                 try:
-                    browser = await pw.chromium.launch(headless=True)
+                    browser = await pw.chromium.launch(
+                        headless=False,
+                        args=[
+                            '--disable-blink-features=AutomationControlled',
+                            '--no-sandbox',
+                            '--disable-setuid-sandbox'
+                        ]
+                    )
                     restart_label = f" (第{browser_restarts}次重啟)" if browser_restarts > 0 else ""
                     print(f"✓ Chromium 瀏覽器已啟動{restart_label}")
 
@@ -462,7 +390,7 @@ async def main(relay_url, num_workers=5):
                     tasks = []
                     for i in range(num_workers):
                         t = asyncio.create_task(
-                            download_worker(browser, relay_url, i + 1, relay_session, None, stop_event, stats, cooldown_state, batch_state, warp_state)
+                            download_worker(browser, relay_url, i + 1, relay_session, None, stop_event, stats, cooldown_state, batch_state)
                         )
                         tasks.append(t)
                         await asyncio.sleep(3)

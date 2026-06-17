@@ -375,7 +375,14 @@ async def main(relay_url, num_workers=5):
             while browser_restarts <= MAX_BROWSER_RESTARTS and not stop_event.is_set():
                 browser = None
                 try:
-                    browser = await pw.chromium.launch(headless=True)
+                    browser = await pw.chromium.launch(
+                        headless=False,
+                        args=[
+                            '--disable-blink-features=AutomationControlled',
+                            '--no-sandbox',
+                            '--disable-setuid-sandbox'
+                        ]
+                    )
                     restart_label = f" (第{browser_restarts}次重啟)" if browser_restarts > 0 else ""
                     print(f"✓ Chromium 瀏覽器已啟動{restart_label}")
 
