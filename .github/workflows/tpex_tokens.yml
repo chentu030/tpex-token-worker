@@ -44,25 +44,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: 檢查 GitHub 原始 IP
-        run: |
-          echo "=== GitHub Actions 原始 IP ==="
-          curl -s https://ifconfig.me
-          echo ""
-
-      - name: Setup Cloudflare WARP
-        uses: fscarmen/warp-on-actions@v1.1
-        with:
-          stack: dual
-
-      - name: 檢查 WARP 洗乾淨後的 IP
-        run: |
-          echo "=== Cloudflare WARP 後的 IP ==="
-          curl -s https://ifconfig.me
-          echo ""
-          echo "=== 驗證 WARP 狀態 ==="
-          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp|colo)="
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
