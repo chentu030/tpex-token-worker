@@ -84,7 +84,7 @@ jobs:
         run: |
           timeout $(((${{ inputs.duration_minutes || 30 }} - 2) * 60)) \
             xvfb-run --auto-servernum \
-            python 分點爬蟲/tpex_remote_token_worker.py \
+            python tpex_remote_token_worker.py \
               "${{ inputs.relay_url }}" \
               ${{ inputs.workers_per_runner || 5 }} \
           || true
