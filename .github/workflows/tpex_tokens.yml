@@ -1,20 +1,20 @@
-# TPEX 遠端下載 Worker — GitHub Actions
-# 每個 runner: 取股票→生成token→下載CSV→上傳結果 (token IP=下載IP, 無不匹配問題)
+# TPEX 遠端 Token 生產器 — GitHub Actions
+# 每個 runner 有不同的 IP，可以並行產生 Turnstile token 而不被 Cloudflare 限速
 #
 # 使用方式:
 #   1. 在本地電腦啟動主程式 (自動開啟 port 9999)
 #   2. 在本地電腦執行: ngrok http 9999
 #   3. 複製 ngrok URL (如 https://xxxx.ngrok-free.app)
-#   4. 到 GitHub repo → Actions → TPEX Download Worker → Run workflow
+#   4. 到 GitHub repo → Actions → TPEX Token Generator → Run workflow
 #   5. 貼入 ngrok URL → 選擇 runner 數量 → 開始
 
-name: TPEX Download Worker
+name: TPEX Token Generator
 
 on:
   workflow_dispatch:
     inputs:
       relay_url:
-        description: 'Relay URL (你的 ngrok URL, 如 https://xxxx.ngrok-free.app)'
+        description: 'Token relay URL (你的 ngrok URL, 如 https://xxxx.ngrok-free.app)'
         required: true
         type: string
       workers_per_runner:
@@ -29,8 +29,8 @@ on:
         type: string
 
 jobs:
-  download-stocks:
-    # 20 個並行 runner = 20 個不同 IP = 100 個下載 worker (每個 runner 5 個)
+  generate-tokens:
+    # 20 個並行 runner = 20 個不同 IP = 100 個 token worker (每個 runner 5 個)
     # GitHub 免費版上限 = 20 個並行 job
     strategy:
       matrix:
@@ -43,6 +43,25 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: 檢查 GitHub 原始 IP
+        run: |
+          echo "=== GitHub Actions 原始 IP ==="
+          curl -s https://ifconfig.me
+          echo ""
+
+      - name: Setup Cloudflare WARP
+        uses: fscarmen/warp-on-actions@v1.1
+        with:
+          stack: dual
+
+      - name: 檢查 WARP 洗乾淨後的 IP
+        run: |
+          echo "=== Cloudflare WARP 後的 IP ==="
+          curl -s https://ifconfig.me
+          echo ""
+          echo "=== 驗證 WARP 狀態 ==="
+          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp|colo)="
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -61,11 +80,11 @@ jobs:
           echo "IP: $(curl -s https://api.ipify.org)"
           echo "Relay: ${{ inputs.relay_url }}"
 
-      - name: Download stocks
+      - name: Generate tokens
         run: |
           timeout $(((${{ inputs.duration_minutes || 30 }} - 2) * 60)) \
             xvfb-run --auto-servernum \
-            python tpex_remote_token_worker.py \
+            python 分點爬蟲/tpex_remote_token_worker.py \
               "${{ inputs.relay_url }}" \
               ${{ inputs.workers_per_runner || 5 }} \
           || true
