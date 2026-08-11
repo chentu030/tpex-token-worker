@@ -338,7 +338,10 @@ async def main(relay_url, num_workers=5):
     MAX_BROWSER_RESTARTS = 3  # 瀏覽器崩潰後最多重啟幾次
 
     headers = {'ngrok-skip-browser-warning': '1'}
-    relay_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), headers=headers)
+    relay_session = aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=180, sock_connect=30, sock_read=180),
+        headers=headers,
+    )
 
     try:
         # 先測試 relay 連線
