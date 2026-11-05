@@ -1,0 +1,138 @@
+# 內部人持股異動事後申報（MOPS ajax_query6_1）— GitHub Actions 分片爬蟲
+# ------------------------------------------------------------------------
+# runner 上唯一需要的程式：雲端架構/gha_insider/insider_gha_worker.py（只依賴 requests）。
+#
+# 觸發：只用 workflow_dispatch，由 VM B 的 trigger_gha.py 以 gh CLI 觸發（每月 16 / 20 / 25 日）。
+#   不設 schedule：排程由 VM B 掌握（台灣時間、有 deps 與失敗通知），GitHub cron 也不準時。
+# 分片：plan job 依 inputs.shards 產生 [0..n-1]；crawl job 每片取 codes[shard::shards]（交錯分片）。
+# 結果：每片上傳 artifact「insider-<月份>-shard-<片號>」(保留 7 天)；VM B 用 gh run download 取回合併。
+#   GitHub 端不寫 GCS、不 commit 回 repo、不需要任何 secret。
+# 速率：每片單執行緒、每次間隔 min_delay～max_delay 秒；查詢過於頻繁/被擋時退避（見 worker 說明）。
+# 網路：不使用代理、不使用 WARP，每個 runner 用自己的 Azure IP。
+
+name: Insider Changes (MOPS)
+run-name: insider ${{ inputs.month }} ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: '資料年月 YYYYMM（西元，例 202610）'
+        required: true
+        type: string
+      codes:
+        description: '逗號分隔的公司代號（VM B 依進度檔算好；約 2,135 家 ≈ 11KB）'
+        required: true
+        type: string
+      shards:
+        description: '分片數 1～20'
+        required: false
+        default: '20'
+        type: string
+      request_id:
+        description: 'VM B 產生的識別碼（用來找回這次 run）'
+        required: false
+        default: 'manual'
+        type: string
+      min_delay:
+        description: '每次請求最短間隔（秒）'
+        required: false
+        default: '1.5'
+        type: string
+      max_delay:
+        description: '每次請求最長間隔（秒）'
+        required: false
+        default: '3'
+        type: string
+      max_minutes:
+        description: '每片最多跑幾分鐘（到點收工、未查的留給下一輪）'
+        required: false
+        default: '25'
+        type: string
+
+permissions:
+  contents: read            # 只需要 checkout；artifact 上傳不需額外權限
+
+concurrency:
+  group: insider-changes    # 同時只允許一個 run，避免兩批 runner 一起打 MOPS
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          MONTH: ${{ inputs.month }}
+          SHARDS: ${{ inputs.shards }}
+          CODES: ${{ inputs.codes }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, re, sys
+          m, s, c = os.environ["MONTH"], os.environ["SHARDS"], os.environ["CODES"]
+          if not re.fullmatch(r"20\d{2}(0[1-9]|1[0-2])", m): sys.exit(f"month 格式錯誤: {m!r}")
+          if not re.fullmatch(r"[0-9A-Z,\s]*", c): sys.exit("codes 只能是代號與逗號")
+          n = max(1, min(20, int(s) if s.isdigit() else 20))
+          ncode = len([x for x in re.split(r"[,\s]+", c) if x])
+          n = min(n, max(1, ncode))
+          print(f"month={m} codes={ncode} shards={n}")
+          open(os.environ["GITHUB_OUTPUT"], "a").write("matrix=" + json.dumps(list(range(n))) + "\n")
+          EOF
+
+  crawl:
+    needs: plan
+    strategy:
+      fail-fast: false            # 一片失敗不影響其他片
+      max-parallel: 20            # 免費方案同時最多 20 個 job
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35           # worker 25 分自己收工，留 10 分給安裝與上傳
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            雲端架構/gha_insider/insider_gha_worker.py
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: pip install --disable-pip-version-check -q requests==2.32.3
+
+      - name: Crawl shard
+        env:
+          MONTH: ${{ inputs.month }}
+          CODES: ${{ inputs.codes }}
+          SHARDS: ${{ strategy.job-total }}
+          SHARD: ${{ matrix.shard }}
+          MIN_DELAY: ${{ inputs.min_delay }}
+          MAX_DELAY: ${{ inputs.max_delay }}
+          MAX_MIN: ${{ inputs.max_minutes }}
+          PYTHONUNBUFFERED: '1'
+          PYTHONUTF8: '1'
+        run: |
+          # 錯開起跑 0～20 秒，避免 20 片同一秒打第一個請求
+          sleep $(( SHARD % 20 ))
+          printf '%s' "$CODES" > codes.txt
+          OUT="out/shard_$(printf %02d "$SHARD")"
+          timeout $(( (${MAX_MIN%.*} + 5) * 60 )) \
+            python 雲端架構/gha_insider/insider_gha_worker.py \
+              --month "$MONTH" --codes-file codes.txt \
+              --shard "$SHARD" --shards "$SHARDS" --out "$OUT" \
+              --min-delay "$MIN_DELAY" --max-delay "$MAX_DELAY" --max-minutes "$MAX_MIN" \
+          || echo "::warning::worker 非正常結束（rc=$?），已寫出的進度仍會上傳"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: insider-${{ inputs.month }}-shard-${{ matrix.shard }}
+          path: out/
+          retention-days: 7
+          if-no-files-found: warn
